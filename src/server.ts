@@ -4,6 +4,10 @@ export function startHealthCheckServer(port: number = 3000) {
   const app = express();
   const startTime = Date.now();
 
+  app.get('/', (req, res) => {
+    res.status(200).send('🟢 Discord-Gemini-Telegram Hiring Bot is LIVE and running 24/7!');
+  });
+
   app.get('/health', (req, res) => {
     res.status(200).json({
       status: 'ok',
