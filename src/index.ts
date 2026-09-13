@@ -40,9 +40,6 @@ client.on('ready', () => {
 
 client.on('messageCreate', async (message) => {
   try {
-    // Ignore self messages
-    if (message.author.id === client.user?.id) return;
-
     const channelId = message.channel.id;
     const parentId = 'parentId' in message.channel ? (message.channel as any).parentId : null;
 
