@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { Client } from 'discord.js-selfbot-v13';
-import { startHealthCheckServer } from './server';
+import { startHealthCheckServer, logEvent, addApprovedJob } from './server';
 import { MessageCache } from './utils/cache';
 import { GeminiJobClassifier } from './ai/classifier';
 import { TelegramNotifier } from './telegram/bot';
@@ -24,7 +24,7 @@ const targetChannelIds = new Set(
   CHANNEL_IDS_RAW.split(',').map(id => id.trim()).filter(id => id.length > 0)
 );
 
-console.log(`[Config] Target Monitored Channels Count: ${targetChannelIds.size}`);
+logEvent(`Target Monitored Channels Count: ${targetChannelIds.size}`);
 
 // Initialize Services
 startHealthCheckServer(PORT);
@@ -34,12 +34,15 @@ const telegram = new TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID);
 const client = new Client();
 
 client.on('ready', () => {
-  console.log(`[Discord] Authenticated as user: ${client.user?.tag} (${client.user?.id})`);
-  console.log('[Discord] Real-time hiring post monitor active 24/7!');
+  logEvent(`Authenticated as user: ${client.user?.tag} (${client.user?.id})`);
+  logEvent('Real-time hiring post monitor active 24/7!');
 });
 
 client.on('messageCreate', async (message) => {
   try {
+    // Ignore self messages
+    if (message.author.id === client.user?.id) return;
+
     const channelId = message.channel.id;
     const parentId = 'parentId' in message.channel ? (message.channel as any).parentId : null;
 
@@ -57,24 +60,25 @@ client.on('messageCreate', async (message) => {
 
     if (!content || content.trim().length === 0) return;
 
-    console.log(`[Discord] New message in #${channelName} from ${authorTag}. Evaluating with Gemini...`);
+    logEvent(`New message in #${channelName} from ${authorTag}. Evaluating with Gemini...`);
 
     // AI Classification
     const result = await classifier.classify(content, authorTag, channelName);
 
     if (result.is_hiring) {
-      console.log(`[Gemini] ✅ Approved HIRING post by ${authorTag}! Dispatched to Telegram.`);
+      logEvent(`✅ Approved HIRING post by ${authorTag}! Dispatched to Telegram.`);
       const guildId = message.guild?.id || '@me';
       const discordUrl = `https://discord.com/channels/${guildId}/${channelId}/${message.id}`;
+      addApprovedJob(result, discordUrl, authorTag, channelName);
       await telegram.sendHiringAlert(result, discordUrl, authorTag, channelName);
     } else {
-      console.log(`[Gemini] ℹ️ Post by ${authorTag} evaluated as NOT hiring (${result.reasoning || 'No hiring match'}). Ignored.`);
+      logEvent(`ℹ️ Post by ${authorTag} evaluated as NOT hiring (${result.reasoning || 'No hiring match'}). Ignored.`);
     }
   } catch (err) {
-    console.error('[Error] Error processing Discord message:', err);
+    logEvent(`[Error] Error processing Discord message: ${err}`);
   }
 });
 
 client.login(DISCORD_TOKEN).catch(err => {
-  console.error('[Discord] Login failed:', err);
+  logEvent(`[Discord] Login failed: ${err}`);
 });

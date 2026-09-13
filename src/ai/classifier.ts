@@ -1,5 +1,3 @@
-import { GoogleGenAI, Type } from '@google/genai';
-
 export interface JobClassification {
   is_hiring: boolean;
   job_title?: string;
@@ -13,66 +11,146 @@ export interface JobClassification {
   reasoning?: string;
 }
 
+// All endpoints to try, in order
+const ENDPOINTS = [
+  'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+  'https://generativelanguage.googleapis.com/v1/models/{model}:generateContent',
+];
+
+// Models to try, in order
+const MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+
+async function callGemini(apiKey: string, prompt: string, asJson: boolean): Promise<string> {
+  const key = (apiKey || '').trim();
+  if (!key) throw new Error('GEMINI_API_KEY is empty');
+
+  const errors: string[] = [];
+
+  for (const model of MODELS) {
+    for (const endpointTemplate of ENDPOINTS) {
+      const url = endpointTemplate.replace('{model}', model);
+
+      // Build request body
+      const body: any = {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
+      };
+      if (asJson) {
+        body.generationConfig.responseMimeType = 'application/json';
+      }
+
+      // Try with ?key= query param
+      try {
+        const res = await fetch(`${url}?key=${key}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json() as any;
+        if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+          return data.candidates[0].content.parts[0].text;
+        }
+        if (data?.error) {
+          errors.push(`[${model} ?key]: ${data.error.message || JSON.stringify(data.error)}`);
+        }
+      } catch (e) {
+        errors.push(`[${model} ?key fetch error]: ${String(e)}`);
+      }
+
+      // Try with x-goog-api-key header
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': key
+          },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json() as any;
+        if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+          return data.candidates[0].content.parts[0].text;
+        }
+        if (data?.error) {
+          errors.push(`[${model} header]: ${data.error.message || JSON.stringify(data.error)}`);
+        }
+      } catch (e) {
+        errors.push(`[${model} header fetch error]: ${String(e)}`);
+      }
+    }
+  }
+
+  throw new Error(`All Gemini strategies failed:\n${errors.slice(-4).join('\n')}`);
+}
+
 export class GeminiJobClassifier {
-  private ai: GoogleGenAI;
+  private apiKey: string;
 
   constructor(apiKey: string) {
-    this.ai = new GoogleGenAI({ apiKey });
+    this.apiKey = (apiKey || '').trim();
   }
 
   async classify(content: string, author: string, channelName: string): Promise<JobClassification> {
-    if (!content || content.trim().length < 10) {
+    if (!content || content.trim().length < 5) {
       return { is_hiring: false, reasoning: 'Content too short' };
     }
 
-    const prompt = `
-Analyze the following post from Discord channel #${channelName} (author: ${author}).
-Determine if this post is an active HIRING opening (an employer/project owner offering work, hiring freelancers, or recruiting employees).
+    if (!this.apiKey) {
+      return { is_hiring: false, reasoning: 'GEMINI_API_KEY environment variable is empty.' };
+    }
 
-CRITICAL DISTINCTION:
-- IS HIRING (is_hiring = true): "Looking for a React developer", "Hiring fullstack engineer", "Need a designer for project", "Paying $50/hr for logo design", "Job position open".
-- NOT HIRING (is_hiring = false): "I am looking for work", "For Hire: Fullstack Dev available", "Check out my portfolio", general chatter, self-promotion, selling services, looking for a job.
+    const prompt = `Analyze this Discord post from #${channelName} (by ${author}) and return ONLY valid JSON:
 
-Post content:
+Post:
 """
-${content}
+${content.slice(0, 1500)}
 """
-`;
+
+Return JSON with these exact fields:
+{
+  "is_hiring": true or false,
+  "job_title": "the role being hired for" or null,
+  "company_or_project": "company/project name" or null,
+  "job_type": "Full-time/Part-time/Freelance/Contract" or null,
+  "location_remote": "Remote/Onsite/location" or null,
+  "salary_budget": "salary or budget if mentioned" or null,
+  "required_skills": ["skill1", "skill2"] or [],
+  "summary": "one sentence summary of the post",
+  "contact_info": "how to apply or DM info" or null,
+  "reasoning": "brief reason for is_hiring decision"
+}
+
+is_hiring = true ONLY if an employer is OFFERING work/job. is_hiring = false if person is SEEKING work or self-promoting.`;
 
     try {
-      const response = await this.ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              is_hiring: { type: Type.BOOLEAN, description: 'True ONLY if the poster is offering work/hiring someone' },
-              job_title: { type: Type.STRING, description: 'Job title or role name' },
-              company_or_project: { type: Type.STRING, description: 'Company or project name if available' },
-              job_type: { type: Type.STRING, description: 'Full-time, Part-time, Contract, Freelance, One-time task' },
-              location_remote: { type: Type.STRING, description: 'Remote, hybrid, or specific location' },
-              salary_budget: { type: Type.STRING, description: 'Salary or budget details' },
-              required_skills: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Extracted key skills/stack' },
-              summary: { type: Type.STRING, description: '2-3 sentence clean summary of what the employer needs' },
-              contact_info: { type: Type.STRING, description: 'How to apply/contact (Discord DM, email, link)' },
-              reasoning: { type: Type.STRING, description: 'Brief explanation of decision' }
-            },
-            required: ['is_hiring']
-          }
-        }
-      });
+      const text = await callGemini(this.apiKey, prompt, true);
+      // Strip markdown code fences if present
+      const clean = text.replace(/```json\n?/gi, '').replace(/```\n?/gi, '').trim();
+      return JSON.parse(clean) as JobClassification;
+    } catch (err) {
+      const msg = String(err);
+      console.error('[Gemini Classify Error]', msg);
+      return { is_hiring: false, reasoning: msg };
+    }
+  }
 
-      const text = response.text;
-      if (!text) {
-        return { is_hiring: false, reasoning: 'Empty response from Gemini' };
-      }
+  async chat(userPrompt: string, context: string): Promise<string> {
+    if (!this.apiKey) {
+      return 'Error: GEMINI_API_KEY is not set in Render environment variables.';
+    }
 
-      return JSON.parse(text) as JobClassification;
-    } catch (error) {
-      console.error('[Gemini] Error during classification:', error);
-      return { is_hiring: false, reasoning: `Gemini error: ${error}` };
+    const prompt = `You are an AI assistant for a Discord hiring monitor bot.
+
+${context}
+
+User question: ${userPrompt}
+
+Answer helpfully and concisely.`;
+
+    try {
+      return await callGemini(this.apiKey, prompt, false);
+    } catch (err) {
+      return `Gemini error: ${String(err).slice(0, 300)}`;
     }
   }
 }
